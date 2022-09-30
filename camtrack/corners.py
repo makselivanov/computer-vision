@@ -16,6 +16,7 @@ import click
 import cv2
 import numpy as np
 import pims
+from numba import njit
 
 from _corners import (
     FrameCorners,
@@ -48,16 +49,55 @@ class _CornerStorageBuilder:
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    # TODO
     image_0 = frame_sequence[0]
-    corners = FrameCorners(
-        np.array([0]),
-        np.array([[0, 0]]),
-        np.array([55])
+    corners = cv2.goodFeaturesToTrack(
+        image_0,
+        maxCorners=50,
+        qualityLevel=0.05,
+        minDistance=10,
+        #mask=np.ones_like(image_0).astype(np.uint8),
+        blockSize=5,
     )
+    #mask = np.zeros_like(image_0)
+    # corners = FrameCorners(
+    #    np.array([0]),
+    #    np.array([[0, 0]]),
+    #    np.array([55])
+    # )
+    index = corners.shape[0]
+    corners = FrameCorners(np.arange(corners.shape[0]), corners, np.ones(corners.shape[0]) * 15)
     builder.set_corners_at_frame(0, corners)
     for frame, image_1 in enumerate(frame_sequence[1:], 1):
+
         builder.set_corners_at_frame(frame, corners)
+        mask = np.zeros_like(image_0).astype(np.uint8)
+        for point in corners.points:
+            mask = cv2.circle(mask, center=(int(point[0]), int(point[1])), radius=30, color=1, thickness=cv2.FILLED)
+
+        nextPts = cv2.goodFeaturesToTrack(
+            image_0,
+            maxCorners=50,
+            qualityLevel=0.05,
+            minDistance=10,
+            mask=mask,
+            blockSize=5,
+        )
+        if nextPts.shape[0] < 50:
+            nextPts = None
+        corners2, st, err = cv2.calcOpticalFlowPyrLK(
+            prevImg=image_0.astype(np.uint8),
+            nextImg=image_1.astype(np.uint8),
+            prevPts=corners.points,
+            nextPts=nextPts,
+            winSize=(5, 5),
+            flags = cv2.OPTFLOW_LK_GET_MIN_EIGENVALS | ((cv2.OPTFLOW_USE_INITIAL_FLOW) if nextPts is not None else 0)
+        )
+        newid = corners._ids.copy()
+        for i, b in enumerate(st):
+            if not b:
+                newid[i] = index
+                index += 1
+        corners = FrameCorners(newid, corners2, corners.sizes)
         image_0 = image_1
 
 

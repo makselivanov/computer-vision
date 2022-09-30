@@ -14,6 +14,7 @@ scikit-learn
 scipy
 sortednp
 transforms3d
+numba
 
 # for windows if you get a GLUT error in render.py
 # download .whl for your python from here
