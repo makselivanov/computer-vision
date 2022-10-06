@@ -54,8 +54,9 @@ def _build_impl(frame_sequence: pims.FramesSequence,
     BLOCK_SIZE = 15 # 11
 
     image_0 = frame_sequence[0]
+    norm_image_0 = cv2.normalize(image_0, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
     corners = cv2.goodFeaturesToTrack(
-        image_0,
+        norm_image_0,
         maxCorners=MAX_CORNERS,
         qualityLevel=0.1,
         minDistance=MIN_DISTANCE,
