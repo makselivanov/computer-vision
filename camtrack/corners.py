@@ -90,7 +90,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
             mask = cv2.circle(mask, center=(int(point[0]), int(point[1])), radius=MIN_DISTANCE, color=0, thickness=cv2.FILLED)
         pts = cv2.goodFeaturesToTrack(
             norm_image_1,
-            maxCorners=MAX_CORNERS - st[st == 0].shape[0],
+            maxCorners=MAX_CORNERS - st[st == 0].shape[0], # needs st[st == 1]
             qualityLevel=0.1,
             minDistance=MIN_DISTANCE,
             mask=mask,
