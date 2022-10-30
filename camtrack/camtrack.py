@@ -86,8 +86,9 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                                                           imagePoints=cur_corner.points[cur_idx_1],
                                                                           cameraMatrix=intrinsic_mat,
                                                                           distCoeffs=None,
-                                                                          reprojectionError=3,
+                                                                          reprojectionError=1,
                                                                           confidence=confidence,
+                                                                          iterationsCount=300
                                                                           )
                         if retval:
                             break
