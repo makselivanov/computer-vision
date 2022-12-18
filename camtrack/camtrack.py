@@ -27,27 +27,8 @@ from _camtrack import (
 )
 
 
-def find_rotmat_tvec(essential_matrix, intrinsic_mat, correspondences, params):
-    #essential_matrix = np.linalg.inv(intrinsic_mat).T @ fundamental_mat @ np.linalg.inv(intrinsic_mat)
-    matrix_w = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
-    matrix_z = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 0]])
-    matrix_u, matrix_s, matrix_v = np.linalg.svd(essential_matrix)
-    all_rotmat = [matrix_u @ matrix_w @ matrix_v.T, matrix_u @ matrix_w.T @ matrix_v.T]
-    all_tvec = [matrix_u[:, 2], -matrix_u[:, 2]]
-    min_error = None
-    best_r, best_t = None, None
-    for i in range(2):
-        for j in range(2):
-            r = all_rotmat[i]
-            t = all_tvec[j]
-            points3d, ids3d, error = triangulate_correspondences(correspondences, eye3x4(),
-                                                                 np.hstack((r, t.reshape(-1, 1))),
-                                                                 intrinsic_mat, params)
-            if min_error is None or min_error > error:
-                min_error = error
-                best_r, best_t = r, t
-    return best_r, best_t
-
+def inverse_transform(r: np.array, t: np.array):
+    return r.inv(), -r.inv().apply(t)
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
@@ -72,9 +53,9 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     if known_view_1 is None or known_view_2 is None:
         CONFIDENCE = 0.90
         MAX_ITERS = 10 ** 4
-        THRESHOLD_PX = 1.0
-        THRESHOLD_HOMOGRAPH = 0.5
-        THRESHOLD_ANGLE_DEGREE = 10
+        THRESHOLD_PX = 3.0
+        THRESHOLD_HOMOGRAPH = 0.6
+        THRESHOLD_ANGLE_DEGREE = 1
 
         params_opencv = dict(
             method=cv2.USAC_MAGSAC,
@@ -86,77 +67,56 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
         # Lets for beginning we take first image and best image of all others
         known_view_1 = (0, view_mat3x4_to_pose(eye3x4()))
-        sift = cv2.SIFT_create()
-        gray_sequence = [cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U) for image in rgb_sequence]
-        kps_1, base_description = sift.detectAndCompute(gray_sequence[0], None) # How to use corners???
-
-        matcher = cv2.BFMatcher_create(
-            cv2.NORM_L2,
-            False
-        )
 
         max_verified_points = 0
-        best_index = -1
-        best_fundamental_mat = None
+        max_homogr_points = 0
+        best_index_1 = -1
+        best_index_2 = -1
         best_r, best_t = None, None
-
-        for index in range(1, len(corner_storage)):
-            # # print("Look on image: ", index)
-            kps_2, description = sift.detectAndCompute(gray_sequence[index], None) # ???
-            ## print("Begin match")
-            matches_1_to_2_by2 = matcher.knnMatch(base_description, description, 2)
-            ## print("match: ", matches_1_to_2_by2)
-            tentatives = []
-            for (p1, p2) in matches_1_to_2_by2:
-                if p1.distance < 0.8 * p2.distance:
-                    tentatives.append(p1)
-            points1 = np.array([kps_1[m.queryIdx].pt for m in tentatives])
-            points2 = np.array([kps_2[m.trainIdx].pt for m in tentatives])
-            ## print("Start to find fundamental matrix")
-
-            # Check Homography if too much
-            matrix_homogr, mask_homogr = cv2.findHomography(points1, points2,
-                                                            ransacReprojThreshold=THRESHOLD_PX,
-                                                            **params_opencv)
-            matrix, mask = cv2.findEssentialMat(points1, points2,
-                                                method=cv2.USAC_MAGSAC,
-                                                cameraMatrix=np.linalg.inv(intrinsic_mat),
-                                                threshold=THRESHOLD_PX,
-                                                prob=CONFIDENCE,
-                                                maxIters=MAX_ITERS)
-            # Check angles is too small
-            if mask_homogr.sum() > THRESHOLD_HOMOGRAPH * mask.sum():
-                continue
-            corr = Correspondences(np.arange(len(points1)), points1, points2)
-            # points3d, ids3d, error = triangulate_correspondences(
-            #     corr,
-            #     view_mats[known_view_1[0]], view_mats[known_view_2[0]],
-            #     intrinsic_mat,
-            #     params
-            # )
-            r, t = find_rotmat_tvec(matrix, intrinsic_mat, corr, params)
-            if max(Rotation.from_matrix(r).as_euler("xyz", True)) < THRESHOLD_ANGLE_DEGREE:
-                continue
-            if max_verified_points < mask.sum():
-                max_verified_points = mask.sum()
-                best_index = index
-                best_r, best_t = r, t
-        # TODO triangualte
-        # retval, rvec, tvec, inliners = cv2.solvePnPRansac(objectPoints=new_points3d[cur_idx_2],
-        #                                                   imagePoints=cur_corner.points[cur_idx_1],
-        #                                                   cameraMatrix=intrinsic_mat,
-        #                                                   distCoeffs=None,
-        #                                                   reprojectionError=1,
-        #                                                   confidence=confidence,
-        #                                                   iterationsCount=300
-        #                                                   )
-        known_view_2 = (best_index, Pose(best_r, best_t))
-        # print("Camera is: ", intrinsic_mat)
-        # print("Best indexs is: ", 0, best_index)
-        # print("Max good points: ", max_verified_points)
-        # print("R, t: \n", best_r, best_t)
-        # print("First image: \n", known_view_1)
-        # print("Second image: \n", known_view_2)
+        assert (np.array_equal(sorted(corner_storage[0].ids), corner_storage[0].ids))
+        for index_1 in range(0, len(corner_storage)):
+            for index_2 in range(index_1 + 20, min(len(corner_storage), index_1 + 80)): # 20 here is min shift
+                # Check Homography if too much
+                ids, (idx_1, idx_2) = snp.intersect(corner_storage[index_1].ids.flatten(), corner_storage[index_2].ids.flatten(),
+                                                    indices=True)
+                points1 = corner_storage[index_1].points[idx_1]
+                points2 = corner_storage[index_2].points[idx_2]
+                matrix_homogr, mask_homogr = cv2.findHomography(points1, points2,
+                                                                ransacReprojThreshold=THRESHOLD_PX,
+                                                                **params_opencv)
+                matrix, mask = cv2.findEssentialMat(points1, points2,
+                                                    method=cv2.RANSAC,
+                                                    cameraMatrix=intrinsic_mat,
+                                                    threshold=THRESHOLD_PX,
+                                                    prob=CONFIDENCE,
+                                                    maxIters=MAX_ITERS)
+                # Check angles is too smallt
+                if mask_homogr.sum() > THRESHOLD_HOMOGRAPH * mask.sum():
+                    #print("TOO MUCH homogr")
+                    continue
+                corr = Correspondences(np.arange(len(points1)), points1, points2)
+                retval, r, t, inliers = cv2.recoverPose(E=matrix,
+                                    points1=points1,
+                                    points2=points2,
+                                    cameraMatrix=intrinsic_mat)
+                if max(abs(Rotation.from_matrix(r).as_euler("xyz", True))) < THRESHOLD_ANGLE_DEGREE:
+                    continue
+                if max_verified_points < retval:
+                    max_verified_points = retval
+                    max_homogr_points = mask_homogr.sum()
+                    best_index_1 = index_1
+                    best_index_2 = index_2
+                    best_r, best_t = r, t
+        print("intrinsic_mat is\n: ", intrinsic_mat)
+        print("Best indexs is: ", best_index_1, best_index_2)
+        print("Max good points: ", max_verified_points)
+        print("Homogr points: ", max_homogr_points)
+        print("R: \n", best_r, "\nt: \n", best_t)
+        inv_r, inv_t = inverse_transform(Rotation.from_matrix(best_r), best_t.reshape(-1))
+        known_view_2 = (best_index_2, Pose(inv_r.as_matrix(), inv_t))
+        known_view_1 = (best_index_1, view_mat3x4_to_pose(eye3x4()))
+        print("First image: \n", known_view_1)
+        print("Second image: \n", known_view_2)
         # END FOR SEARCHING TWO IMAGE
 
     frame_count = len(corner_storage)
@@ -198,6 +158,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         while not max_retval:
             confidence -= 0.01
             if confidence < 0:
+                print("Cur loop: ", loop)
                 raise ValueError("Can't find confidence result")
             for index in range(frame_count):
                 if not is_camera_found[index]:
@@ -206,7 +167,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                                                     new_ids3d.flatten(),
                                                                     indices=True)
                     if len(cur_ids) >= max_len_cur_ids:
-                        retval, rvec, tvec, inliners = cv2.solvePnPRansac(objectPoints=new_points3d[cur_idx_2],
+                        retval, rvec, tvec, inliers = cv2.solvePnPRansac(objectPoints=new_points3d[cur_idx_2],
                                                                           imagePoints=cur_corner.points[cur_idx_1],
                                                                           cameraMatrix=intrinsic_mat,
                                                                           distCoeffs=None,
@@ -228,9 +189,10 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         rvec = max_rvec
         tvec = max_tvec
         is_camera_found[index] = True
-        ratmat = Rotation.from_rotvec(rvec.reshape(-1)).as_matrix().T
-        transp = -ratmat @ tvec
-        view_mats[index] = pose_to_view_mat3x4(Pose(ratmat, transp))
+        ratmat, transp = inverse_transform(Rotation.from_rotvec(rvec.reshape(-1)), tvec.reshape(-1))
+        # ratmat = Rotation.from_rotvec(rvec.reshape(-1)).as_matrix().T
+        # transp = -ratmat @ tvec
+        view_mats[index] = pose_to_view_mat3x4(Pose(ratmat.as_matrix(), transp))
         cur_corner = corner_storage[index]
         for other in range(frame_count):
             other_corner = corner_storage[other]
