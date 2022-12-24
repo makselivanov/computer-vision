@@ -30,6 +30,7 @@ from _camtrack import (
 def inverse_transform(r: np.array, t: np.array):
     return r.inv(), -r.inv().apply(t)
 
+
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
                           frame_sequence_path: str,
@@ -73,9 +74,10 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         best_index_1 = -1
         best_index_2 = -1
         best_r, best_t = None, None
-        assert (np.array_equal(sorted(corner_storage[0].ids), corner_storage[0].ids))
+        # print("All indexs: ", len(corner_storage))
         for index_1 in range(0, len(corner_storage)):
-            for index_2 in range(index_1 + 20, min(len(corner_storage), index_1 + 80)): # 20 here is min shift
+            # print("Cur index: ", index_1)
+            for index_2 in range(index_1 + 20, min(len(corner_storage), index_1 + 30)): # 20 here is min shift
                 # Check Homography if too much
                 ids, (idx_1, idx_2) = snp.intersect(corner_storage[index_1].ids.flatten(), corner_storage[index_2].ids.flatten(),
                                                     indices=True)
