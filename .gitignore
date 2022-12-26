@@ -131,3 +131,9 @@ dmypy.json
 
 .idea
 output/
+dataset
+error_measure.yml
+results/
+results_log.txt
+script.bash
+

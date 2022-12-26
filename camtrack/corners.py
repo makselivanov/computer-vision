@@ -49,8 +49,8 @@ class _CornerStorageBuilder:
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    MAX_CORNERS = 150 #150
-    MIN_DISTANCE = 30 #10 or 30
+    MAX_CORNERS = 200 #200
+    MIN_DISTANCE = 20 #15, 10 or 30
     BLOCK_SIZE = 9 # 9
 
     image_0 = frame_sequence[0]
@@ -58,7 +58,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
     corners = cv2.goodFeaturesToTrack(
         norm_image_0,
         maxCorners=MAX_CORNERS,
-        qualityLevel=0.11,#0.11
+        qualityLevel=0.005,#0.11
         minDistance=MIN_DISTANCE,
         blockSize=BLOCK_SIZE,
     )
@@ -78,16 +78,37 @@ def _build_impl(frame_sequence: pims.FramesSequence,
             nextPts=None,
             flags=cv2.OPTFLOW_LK_GET_MIN_EIGENVALS,
             winSize=(BLOCK_SIZE, BLOCK_SIZE),
-            maxLevel=3,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.001),
-            minEigThreshold=0.0011)#0.0011
+            maxLevel=5,
+            #criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.001),
+            minEigThreshold=0.00011) #0.0011
+        if st.sum() < 100:
+            p1, st, _err = cv2.calcOpticalFlowPyrLK(
+                prevImg=norm_image_0,
+                nextImg=norm_image_1,
+                prevPts=p0,
+                nextPts=None,
+                flags=cv2.OPTFLOW_LK_GET_MIN_EIGENVALS,
+                winSize=(BLOCK_SIZE, BLOCK_SIZE),
+                maxLevel=5,
+                #criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.001),
+                minEigThreshold=0.00001)  # 0.000001
         mask = np.ones_like(norm_image_1)
-        for i, point in enumerate(p1):
-            mask = cv2.circle(mask, center=(int(point[0]), int(point[1])), radius=MIN_DISTANCE, color=0, thickness=cv2.FILLED)
+        index = 0
+        for i, p in enumerate(p1):
+            if st[i] == 1:
+                y, x = int(p[1]), int(p[0])
+                if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1] and mask[int(p[1]), int(p[0])] == 1:
+                    mask = cv2.circle(mask,
+                                      center=(int(p[0]), int(p[1])),
+                                      radius=MIN_DISTANCE,
+                                      color=0,
+                                      thickness=cv2.FILLED)
+                else:
+                    st[i] = 0
         pts = cv2.goodFeaturesToTrack(
             norm_image_1,
             maxCorners=MAX_CORNERS - st[st == 1].shape[0],
-            qualityLevel=0.11,#0.11
+            qualityLevel=0.011,#0.11
             minDistance=MIN_DISTANCE,
             mask=mask,
             blockSize=BLOCK_SIZE,

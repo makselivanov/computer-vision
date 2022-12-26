@@ -60,8 +60,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
         params_opencv = dict(
             method=cv2.USAC_MAGSAC,
-            #ransacReprojThreshold=THRESHOLD_PX,
-            #threshold=THRESHOLD_PX,
+            # ransacReprojThreshold=THRESHOLD_PX,
+            # threshold=THRESHOLD_PX,
             confidence=CONFIDENCE,
             maxIters=MAX_ITERS
         )
@@ -74,15 +74,22 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         best_index_1 = -1
         best_index_2 = -1
         best_r, best_t = None, None
+        # print("Max corner id: ", corner_storage.max_corner_id())
         # print("All indexs: ", len(corner_storage))
         for index_1 in range(0, len(corner_storage)):
             # print("Cur index: ", index_1)
-            for index_2 in range(index_1 + 20, min(len(corner_storage), index_1 + 30)): # 20 here is min shift
+            loop_range = range(index_1 + 20, len(corner_storage), 20)
+            if len(corner_storage) < 50:
+                loop_range = range(index_1 + 1, len(corner_storage))
+            for index_2 in loop_range:  # 20 here is min shift
                 # Check Homography if too much
-                ids, (idx_1, idx_2) = snp.intersect(corner_storage[index_1].ids.flatten(), corner_storage[index_2].ids.flatten(),
+                ids, (idx_1, idx_2) = snp.intersect(corner_storage[index_1].ids.flatten(),
+                                                    corner_storage[index_2].ids.flatten(),
                                                     indices=True)
                 points1 = corner_storage[index_1].points[idx_1]
                 points2 = corner_storage[index_2].points[idx_2]
+
+                # print(index_1, index_2)
                 matrix_homogr, mask_homogr = cv2.findHomography(points1, points2,
                                                                 ransacReprojThreshold=THRESHOLD_PX,
                                                                 **params_opencv)
@@ -94,31 +101,32 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                                     maxIters=MAX_ITERS)
                 # Check angles is too smallt
                 if mask_homogr.sum() > THRESHOLD_HOMOGRAPH * mask.sum():
-                    #print("TOO MUCH homogr")
+                    # print("TOO MUCH homogr")
                     continue
-                corr = Correspondences(np.arange(len(points1)), points1, points2)
+                # corr = Correspondences(np.arange(len(points1)), points1, points2)
                 retval, r, t, inliers = cv2.recoverPose(E=matrix,
-                                    points1=points1,
-                                    points2=points2,
-                                    cameraMatrix=intrinsic_mat)
+                                                        points1=points1,
+                                                        points2=points2,
+                                                        cameraMatrix=intrinsic_mat)
                 if max(abs(Rotation.from_matrix(r).as_euler("xyz", True))) < THRESHOLD_ANGLE_DEGREE:
+                    # print("TOO LITTLE angle")
                     continue
+                # print(index_1, index_2, retval)
                 if max_verified_points < retval:
                     max_verified_points = retval
                     max_homogr_points = mask_homogr.sum()
                     best_index_1 = index_1
                     best_index_2 = index_2
                     best_r, best_t = r, t
-        print("intrinsic_mat is\n: ", intrinsic_mat)
-        print("Best indexs is: ", best_index_1, best_index_2)
-        print("Max good points: ", max_verified_points)
-        print("Homogr points: ", max_homogr_points)
-        print("R: \n", best_r, "\nt: \n", best_t)
+        # print("Best indexs is: ", best_index_1, best_index_2)
+        # print("Max good points: ", max_verified_points)
+        # print("Homogr points: ", max_homogr_points)
+        # print("R: \n", best_r, "\nt: \n", best_t)
         inv_r, inv_t = inverse_transform(Rotation.from_matrix(best_r), best_t.reshape(-1))
         known_view_2 = (best_index_2, Pose(inv_r.as_matrix(), inv_t))
         known_view_1 = (best_index_1, view_mat3x4_to_pose(eye3x4()))
-        print("First image: \n", known_view_1)
-        print("Second image: \n", known_view_2)
+        # print("First image: \n", known_view_1)
+        # print("Second image: \n", known_view_2)
         # END FOR SEARCHING TWO IMAGE
 
     frame_count = len(corner_storage)
@@ -170,13 +178,13 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                                                     indices=True)
                     if len(cur_ids) >= max_len_cur_ids:
                         retval, rvec, tvec, inliers = cv2.solvePnPRansac(objectPoints=new_points3d[cur_idx_2],
-                                                                          imagePoints=cur_corner.points[cur_idx_1],
-                                                                          cameraMatrix=intrinsic_mat,
-                                                                          distCoeffs=None,
-                                                                          reprojectionError=1,
-                                                                          confidence=confidence,
-                                                                          iterationsCount=300
-                                                                          )
+                                                                         imagePoints=cur_corner.points[cur_idx_1],
+                                                                         cameraMatrix=intrinsic_mat,
+                                                                         distCoeffs=None,
+                                                                         reprojectionError=6,
+                                                                         confidence=confidence,
+                                                                         iterationsCount=1000
+                                                                         )
                         if retval:
                             max_retval = True
                             mn_index = index
@@ -185,15 +193,14 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                             max_tvec = tvec
                             pass
 
-                        #if retval:
+                        # if retval:
                         #    break
         index = mn_index
         rvec = max_rvec
         tvec = max_tvec
         is_camera_found[index] = True
         ratmat, transp = inverse_transform(Rotation.from_rotvec(rvec.reshape(-1)), tvec.reshape(-1))
-        # ratmat = Rotation.from_rotvec(rvec.reshape(-1)).as_matrix().T
-        # transp = -ratmat @ tvec
+        #ratmat, transp = Rotation.from_rotvec(rvec.reshape(-1)), tvec.reshape(-1)
         view_mats[index] = pose_to_view_mat3x4(Pose(ratmat.as_matrix(), transp))
         cur_corner = corner_storage[index]
         for other in range(frame_count):
