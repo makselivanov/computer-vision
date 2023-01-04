@@ -31,6 +31,19 @@ def inverse_transform(r: np.array, t: np.array):
     return r.inv(), -r.inv().apply(t)
 
 
+def calc_triangulation_angles(camera_pose_1, camera_pose_2, points3d):
+    rmat1 = camera_pose_1.r_mat
+    t1 = camera_pose_1.t_vec
+    rmat2 = camera_pose_2.r_mat
+    t2 = camera_pose_2.t_vec
+    vec1 = (rmat1 @ (2 * np.linalg.inv(rmat1) @ (points3d - t1).T)).T + t1 - points3d
+    vec2 = (rmat2 @ (2 * np.linalg.inv(rmat2) @ (points3d - t2).T)).T + t2 - points3d
+    angles = []
+    for v1, v2 in zip(vec1, vec2):
+        angles.append(np.arccos(np.clip(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)), -1, 1)))
+    return np.array(angles)
+
+
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
                           frame_sequence_path: str,
@@ -56,7 +69,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         MAX_ITERS = 10 ** 4
         THRESHOLD_PX = 3.0
         THRESHOLD_HOMOGRAPH = 0.6
-        THRESHOLD_ANGLE_DEGREE = 1
+        THRESHOLD_ANGLE_RADIAN = 0.1
 
         params_opencv = dict(
             method=cv2.USAC_MAGSAC,
@@ -74,11 +87,12 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         best_index_1 = -1
         best_index_2 = -1
         best_r, best_t = None, None
+        min_error = 5
         # print("Max corner id: ", corner_storage.max_corner_id())
         # print("All indexs: ", len(corner_storage))
         for index_1 in range(0, len(corner_storage)):
             # print("Cur index: ", index_1)
-            loop_range = range(index_1 + 20, len(corner_storage), 20)
+            loop_range = range(index_1 + 1, min(index_1 + 40, len(corner_storage)))
             if len(corner_storage) < 50:
                 loop_range = range(index_1 + 1, len(corner_storage))
             for index_2 in loop_range:  # 20 here is min shift
@@ -108,11 +122,25 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                                         points1=points1,
                                                         points2=points2,
                                                         cameraMatrix=intrinsic_mat)
-                if max(abs(Rotation.from_matrix(r).as_euler("xyz", True))) < THRESHOLD_ANGLE_DEGREE:
+                inv_r, inv_t = inverse_transform(Rotation.from_matrix(r), t.reshape(-1))
+                pose_2 = Pose(inv_r.as_matrix(), inv_t)
+                pose_1 = view_mat3x4_to_pose(eye3x4())
+                corr = Correspondences(ids, corner_storage[index_1].points[idx_1], corner_storage[index_2].points[idx_2])
+                points3d, ids3d, error = triangulate_correspondences(
+                    corr,
+                    eye3x4(), pose_to_view_mat3x4(pose_2),
+                    intrinsic_mat,
+                    params
+                )
+                # print(index_1, index_2, error)
+                if error > min_error:
                     # print("TOO LITTLE angle")
-                    continue
+                    pass
+                min_error = error
                 # print(index_1, index_2, retval)
-                if max_verified_points < retval:
+                angle = np.mean(calc_triangulation_angles(pose_1, pose_2, points3d))
+                print(index_1, index_2, angle)
+                if max_verified_points < retval and angle > THRESHOLD_ANGLE_RADIAN:
                     max_verified_points = retval
                     max_homogr_points = mask_homogr.sum()
                     best_index_1 = index_1
@@ -128,7 +156,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         # print("First image: \n", known_view_1)
         # print("Second image: \n", known_view_2)
         # END FOR SEARCHING TWO IMAGE
-
+    # END OF FIND INITIAL TWO IMAGE
     frame_count = len(corner_storage)
     is_camera_found = [False] * frame_count
     view_mats = [pose_to_view_mat3x4(known_view_1[1])] * frame_count
@@ -181,9 +209,9 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                                                          imagePoints=cur_corner.points[cur_idx_1],
                                                                          cameraMatrix=intrinsic_mat,
                                                                          distCoeffs=None,
-                                                                         reprojectionError=6,
+                                                                         reprojectionError=3,
                                                                          confidence=confidence,
-                                                                         iterationsCount=1000
+                                                                         iterationsCount=200
                                                                          )
                         if retval:
                             max_retval = True
