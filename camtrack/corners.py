@@ -28,7 +28,8 @@ from _corners import (
     calc_track_interval_mappings,
     calc_track_len_array_mapping,
     without_short_tracks,
-    create_cli
+    create_cli,
+    filter_frame_corners
 )
 
 
@@ -47,25 +48,34 @@ class _CornerStorageBuilder:
         return StorageImpl(item[1] for item in sorted(self._corners.items()))
 
 
+def get_size_of_corners(image, corners, **kwargs):
+    eigens = cv2.cornerMinEigenVal(np.uint8(image), **kwargs)
+    max_eigen = np.max(eigens)
+    return np.apply_along_axis(lambda point: eigens[int(point[1]), int(point[0])], 1, corners) / max_eigen * 25 + 10
+
+
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
     MAX_CORNERS = 200 #200
     MIN_DISTANCE = 20 #15, 10 or 30
-    BLOCK_SIZE = 9 # 9
+    QUALITY_LEVEL = 0.01
+    BLOCK_SIZE = 7 # 9
 
     image_0 = frame_sequence[0]
     norm_image_0 = cv2.normalize(image_0, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
     corners = cv2.goodFeaturesToTrack(
         norm_image_0,
         maxCorners=MAX_CORNERS,
-        qualityLevel=0.005,#0.11
+        qualityLevel=QUALITY_LEVEL,
         minDistance=MIN_DISTANCE,
         blockSize=BLOCK_SIZE,
     )
 
     corners = corners.reshape(-1, 2)
     index = corners.shape[0]
-    corners = FrameCorners(np.arange(corners.shape[0]), corners, np.ones(corners.shape[0]) * 15)
+    corners = FrameCorners(np.arange(corners.shape[0]), corners,
+                           get_size_of_corners(norm_image_0, corners, blockSize=BLOCK_SIZE, ksize=3)
+                           )
     builder.set_corners_at_frame(0, corners)
     for frame, image_1 in enumerate(frame_sequence[1:], 1):
         p0 = corners.points
@@ -77,68 +87,44 @@ def _build_impl(frame_sequence: pims.FramesSequence,
             prevPts=p0,
             nextPts=None,
             flags=cv2.OPTFLOW_LK_GET_MIN_EIGENVALS,
-            winSize=(BLOCK_SIZE, BLOCK_SIZE),
+            winSize=(15, 15),
             maxLevel=5,
-            #criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.001),
-            minEigThreshold=0.00011) #0.0011
-        if st.sum() < 100:
-            p1, st, _err = cv2.calcOpticalFlowPyrLK(
-                prevImg=norm_image_0,
-                nextImg=norm_image_1,
-                prevPts=p0,
-                nextPts=None,
-                flags=cv2.OPTFLOW_LK_GET_MIN_EIGENVALS,
-                winSize=(BLOCK_SIZE, BLOCK_SIZE),
-                maxLevel=5,
-                #criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.001),
-                minEigThreshold=0.00001)  # 0.000001
-        mask = np.ones_like(norm_image_1)
-        index = 0
-        for i, p in enumerate(p1):
-            if st[i] == 1:
-                y, x = int(p[1]), int(p[0])
-                if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1] and mask[int(p[1]), int(p[0])] == 1:
-                    mask = cv2.circle(mask,
-                                      center=(int(p[0]), int(p[1])),
-                                      radius=MIN_DISTANCE,
-                                      color=0,
-                                      thickness=cv2.FILLED)
-                else:
-                    st[i] = 0
-        pts = cv2.goodFeaturesToTrack(
-            norm_image_1,
-            maxCorners=MAX_CORNERS - st[st == 1].shape[0],
-            qualityLevel=0.011,#0.11
-            minDistance=MIN_DISTANCE,
-            mask=mask,
-            blockSize=BLOCK_SIZE,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.02),
+            #minEigThreshold=0.00011) #0.0011
         )
-        if pts is None:
+        corners = FrameCorners(corners.ids, p1, corners.sizes)
+        corners = filter_frame_corners(corners, (st == 1).reshape(-1))
+        corners = filter_frame_corners(corners, np.apply_along_axis(
+            lambda point: 0 <= point[0] < image_1.shape[1] and 0 <= point[1] < image_1.shape[0],
+            1, corners.points
+        ))
+        mask = np.ones_like(norm_image_1)
+        for i, p in enumerate(corners.points):
+            y, x = int(p[1]), int(p[0])
+            if mask[y, x] == 1:
+                mask = cv2.circle(mask,
+                                  center=(x, y),
+                                  radius=MIN_DISTANCE,
+                                  color=0,
+                                  thickness=cv2.FILLED)
+        pts = None
+        if MAX_CORNERS - corners.points.shape[0] > 0:
             pts = cv2.goodFeaturesToTrack(
                 norm_image_1,
-                maxCorners=MAX_CORNERS - st[st == 1].shape[0],
-                qualityLevel=0.005,  # 0.11
+                maxCorners=MAX_CORNERS - corners.points.shape[0],
+                qualityLevel=QUALITY_LEVEL,
                 minDistance=MIN_DISTANCE,
                 mask=mask,
                 blockSize=BLOCK_SIZE,
             )
-        pts = pts.reshape(-1, 2)
-        j = 0
-        newid = []
-        newcorners = []
-        for i in range(MAX_CORNERS):
-            if i >= len(st) or st[i] == 0:
-                if j < pts.shape[0]:
-                    newid.append(index)
-                    index += 1
-                    newcorners.append(pts[j])
-                    j += 1
-            else:
-                newid.append(corners.ids[i, 0])
-                newcorners.append(p1[i])
-        newcorners = np.array(newcorners)
-        newid = np.array(newid)
-        corners = FrameCorners(newid, newcorners, np.ones(newcorners.shape[0]) * 15)
+        if pts is not None:
+            pts = pts.reshape(-1, 2)
+            corners = FrameCorners(
+                np.concatenate([corners.ids.reshape(-1), np.arange(index, index + pts.shape[0])]),
+                np.concatenate([corners.points, pts]),
+                np.concatenate([corners.sizes.reshape(-1), get_size_of_corners(norm_image_1, pts, blockSize=BLOCK_SIZE, ksize=3)])
+            )
+            index += pts.shape[0]
         builder.set_corners_at_frame(frame, corners)
         image_0 = image_1
 
