@@ -51,14 +51,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                           known_view_2: Optional[Tuple[int, Pose]] = None) \
         -> Tuple[List[Pose], PointCloud]:
     params = TriangulationParameters(1, 1, 0)
-
-    # print("Container max id: ", corner_storage.max_corner_id())
-    # print("Container len: ", len(corner_storage))
-
+    frame_count = len(corner_storage)
     rgb_sequence = frameseq.read_rgb_f32(frame_sequence_path)
-
-    # print("rgb_sequence : ", len(rgb_sequence))
-
     intrinsic_mat = to_opencv_camera_mat3x3(
         camera_parameters,
         rgb_sequence[0].shape[0]
@@ -88,13 +82,11 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         best_index_2 = -1
         best_r, best_t = None, None
         min_error = 5
-        # print("Max corner id: ", corner_storage.max_corner_id())
-        # print("All indexs: ", len(corner_storage))
-        for index_1 in range(0, len(corner_storage)):
+        for index_1 in range(0, frame_count):
             # print("Cur index: ", index_1)
-            loop_range = range(index_1 + 1, min(index_1 + 40, len(corner_storage)))
-            if len(corner_storage) < 50:
-                loop_range = range(index_1 + 1, len(corner_storage))
+            loop_range = range(index_1 + 1, min(index_1 + 40, frame_count))
+            if frame_count < 50:
+                loop_range = range(index_1 + 1, frame_count)
             for index_2 in loop_range:  # 20 here is min shift
                 # Check Homography if too much
                 ids, (idx_1, idx_2) = snp.intersect(corner_storage[index_1].ids.flatten(),
@@ -132,6 +124,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                     intrinsic_mat,
                     params
                 )
+                if points3d.shape[0] < 10:
+                    continue
                 # print(index_1, index_2, error)
                 if error > min_error:
                     # print("TOO LITTLE angle")
@@ -139,7 +133,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                 min_error = error
                 # print(index_1, index_2, retval)
                 angle = np.mean(calc_triangulation_angles(pose_1, pose_2, points3d))
-                print(index_1, index_2, angle)
+                # print(index_1, index_2, angle)
                 if max_verified_points < retval and angle > THRESHOLD_ANGLE_RADIAN:
                     max_verified_points = retval
                     max_homogr_points = mask_homogr.sum()
@@ -157,7 +151,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         # print("Second image: \n", known_view_2)
         # END FOR SEARCHING TWO IMAGE
     # END OF FIND INITIAL TWO IMAGE
-    frame_count = len(corner_storage)
+    print("End of initialization")
     is_camera_found = [False] * frame_count
     view_mats = [pose_to_view_mat3x4(known_view_1[1])] * frame_count
     is_camera_found[known_view_1[0]] = True
