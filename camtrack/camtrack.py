@@ -46,13 +46,15 @@ def calc_triangulation_angles(camera_pose_1, camera_pose_2, points3d):
     return np.array(angles)
 
 
+ITERATIONS_COUNT = 200
+CONFIDENCE = 0.99
+REPROJECTION_ERROR = 8.
+ERROR_THRESHOLD = 10
+
+
 def find_new_best_view(unknown_frames, known_frames,
                        corner_storage, ids3d, points3d,
                        view_mats, intrinsic_mat):
-    ITERATIONS_COUNT = 200
-    CONFIDENCE = 0.99
-    REPROJECTION_ERROR = 8.
-    ERROR_THRESHOLD = 10
     min_error = 100
     min_frame = None
     min_view = None
@@ -76,9 +78,22 @@ def find_new_best_view(unknown_frames, known_frames,
             min_frame = frame
             min_view = view_mat
     if min_error > ERROR_THRESHOLD:
-        # TODO
-        print("Too big error for new view ", min_error)
-        pass
+        max_inliers = -1
+        for frame in unknown_frames:
+            corners = corner_storage[frame]
+            cur_ids, _ = snp.intersect(corners.ids.flatten(), ids3d.flatten(), indices=True)
+            if len(cur_ids) > max_inliers:
+                max_inliers = len(cur_ids)
+                min_frame = frame
+        corners = corner_storage[min_frame]
+        cur_ids, (cur_idx_1, cur_idx_2) = snp.intersect(corners.ids.flatten(), ids3d.flatten(), indices=True)
+        retval, rvec, tvec, _ = cv2.solvePnPRansac(points3d[cur_idx_2], corners.points[cur_idx_1],
+                                                   intrinsic_mat, None,
+                                                   reprojectionError=REPROJECTION_ERROR,
+                                                   confidence=CONFIDENCE,
+                                                   iterationsCount=ITERATIONS_COUNT)
+        min_view = rodrigues_and_translation_to_view_mat3x4(rvec, tvec.reshape(-1, 1))
+
     return min_frame, min_view
 
 
@@ -175,6 +190,21 @@ def retriangulate(known_frames, corner_storage,
             points3d[index] = new_point3d
 
 
+def retrace_views(known_frames, corner_storage, ids3d, points3d, view_mats, intrinsic_mat):
+    for frame in known_frames:
+        corners = corner_storage[frame]
+        cur_ids, (cur_idx_1, cur_idx_2) = snp.intersect(corners.ids.flatten(), ids3d.flatten(), indices=True)
+        retval, rvec, tvec, _ = cv2.solvePnPRansac(points3d[cur_idx_2], corners.points[cur_idx_1],
+                                                   intrinsic_mat, None,
+                                                   reprojectionError=REPROJECTION_ERROR,
+                                                   confidence=CONFIDENCE,
+                                                   iterationsCount=ITERATIONS_COUNT)
+        if not retval:
+            continue
+        view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec.reshape(-1, 1))
+        view_mats[frame] = view_mat
+
+
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
                           frame_sequence_path: str,
@@ -230,9 +260,9 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                view_mats, intrinsic_mat, point_cloud_builder)
         known_frames.append(new_frame)
 
-        if i % 2 == 0:
+        if i % 10 == 0:
             retriangulate(known_frames, corner_storage, ids3d, points3d, view_mats, intrinsic_mat)
-            pass
+            retrace_views(known_frames, corner_storage, ids3d, points3d, view_mats, intrinsic_mat)
 
     calc_point_cloud_colors(
         point_cloud_builder,
@@ -240,7 +270,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         view_mats,
         intrinsic_mat,
         corner_storage,
-        8.
+        5.
     )
     point_cloud = point_cloud_builder.build_point_cloud()
     poses = list(map(view_mat3x4_to_pose, view_mats))
