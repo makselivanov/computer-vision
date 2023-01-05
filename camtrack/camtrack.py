@@ -23,7 +23,9 @@ from _camtrack import (
     triangulate_correspondences,
     eye3x4,
     rodrigues_and_translation_to_view_mat3x4,
-    Correspondences, TriangulationParameters
+    Correspondences, TriangulationParameters,
+    compute_reprojection_errors,
+    build_correspondences
 )
 
 
@@ -44,14 +46,144 @@ def calc_triangulation_angles(camera_pose_1, camera_pose_2, points3d):
     return np.array(angles)
 
 
+def find_new_best_view(unknown_frames, known_frames,
+                       corner_storage, ids3d, points3d,
+                       view_mats, intrinsic_mat):
+    ITERATIONS_COUNT = 200
+    CONFIDENCE = 0.99
+    REPROJECTION_ERROR = 8.
+    ERROR_THRESHOLD = 10
+    min_error = 100
+    min_frame = None
+    min_view = None
+
+    for frame in unknown_frames:
+        corners = corner_storage[frame]
+        cur_ids, (cur_idx_1, cur_idx_2) = snp.intersect(corners.ids.flatten(), ids3d.flatten(), indices=True)
+        retval, rvec, tvec, _ = cv2.solvePnPRansac(points3d[cur_idx_2], corners.points[cur_idx_1],
+                                                         intrinsic_mat, None,
+                                                         reprojectionError=REPROJECTION_ERROR,
+                                                         confidence=CONFIDENCE,
+                                                         iterationsCount=ITERATIONS_COUNT)
+        if not retval:
+            continue
+        # rvec, tvec = inverse_transform(Rotation.from_rotvec(rvec.reshape(-1)), tvec.reshape(-1))
+        # rvec = rvec.as_rotvec()
+        view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec.reshape(-1, 1))
+        error = compute_reprojection_errors(points3d[cur_idx_2], corners.points[cur_idx_1], intrinsic_mat @ view_mat).mean()
+        if error < min_error:
+            min_error = error
+            min_frame = frame
+            min_view = view_mat
+    if min_error > ERROR_THRESHOLD:
+        # TODO
+        print("Too big error for new view ", min_error)
+        pass
+    return min_frame, min_view
+
+
+params = TriangulationParameters(8., 0.5, 0.2)
+
+
+def triangulate_new_points(new_frame, known_frames,
+                           corner_storage, ids3d,
+                           view_mats, intrinsic_mat, point_cloud_builder):
+    ANGLE_THESHOLD = 5.
+    curr_corners = corner_storage[new_frame]
+    curr_view = view_mats[new_frame]
+    for frame in known_frames:
+        corners = corner_storage[frame]
+        view = view_mats[frame]
+        correspondences = build_correspondences(corners, curr_corners, ids3d)
+        if len(correspondences.ids) == 0:
+            continue
+        new_points3d, new_ids3d, cos = triangulate_correspondences(correspondences, view, curr_view, intrinsic_mat, params)
+        angle = np.arccos(cos) * 180 / np.pi
+        if new_points3d is None or angle < ANGLE_THESHOLD:
+            continue
+        point_cloud_builder.update_points(new_ids3d, new_points3d)
+        ids3d, _, _ = point_cloud_builder.build_point_cloud()
+
+
+def find_best_init_frames(corner_storage, intrinsic_mat):
+    POINTS_THRESHOLD = 20
+    THRESHOLD_HOMOGRAPH = 0.7
+    INLIERS_THRESHOLD = 5
+    frame_count = len(corner_storage)
+    max_angle = -1
+    best_view_mat_1 = None
+    best_view_mat_2 = None
+    step = 10
+    if frame_count < 150:
+        step = 5
+    if frame_count < 60:
+        step = 1
+    for frame_1 in range(0, frame_count, step):
+        for frame_2 in range(frame_1 + step, frame_count, step):
+            print("Current init frames: ", frame_1, frame_2)
+            ids, (idx_1, idx_2) = snp.intersect(corner_storage[frame_1].ids.flatten(),
+                                                corner_storage[frame_2].ids.flatten(),
+                                                indices=True)
+            points1 = corner_storage[frame_1].points[idx_1]
+            points2 = corner_storage[frame_2].points[idx_2]
+            if len(points1) < POINTS_THRESHOLD:
+                continue
+            matrix_homogr, mask_homogr = cv2.findHomography(points1, points2, cv2.RANSAC)
+            matrix, mask = cv2.findEssentialMat(points1, points2, intrinsic_mat, cv2.RANSAC)
+
+            if mask_homogr.sum() >= mask.sum() * THRESHOLD_HOMOGRAPH:
+                continue
+            retval, r, t, _ = cv2.recoverPose(matrix, points1, points2, intrinsic_mat, cv2.RANSAC)
+            if retval < INLIERS_THRESHOLD:
+                continue
+            view_mat_1 = pose_to_view_mat3x4(Pose(np.eye(3), np.zeros(3)))
+            r, t = inverse_transform(Rotation.from_matrix(r), t.reshape(-1))
+            r = r.as_matrix()
+            view_mat_2 = pose_to_view_mat3x4(Pose(r, t.reshape(-1)))
+            corr = build_correspondences(corner_storage[frame_1], corner_storage[frame_2])
+            if len(corr.ids) == 0:
+                continue
+            points_3d, ids_3d, cos = triangulate_correspondences(corr, view_mat_1, view_mat_2, intrinsic_mat, params)
+            if len(ids_3d) == 0:
+                continue
+            angle = abs(np.arccos(cos))
+            if angle > max_angle:
+                max_angle = angle
+                best_view_mat_1 = (frame_1, view_mat3x4_to_pose(view_mat_1))
+                best_view_mat_2 = (frame_2, view_mat3x4_to_pose(view_mat_2))
+    return best_view_mat_1, best_view_mat_2
+
+
+def retriangulate(known_frames, corner_storage,
+                  ids3d, points3d,
+                  view_mats, intrinsic_mat):
+    for (index, id) in enumerate(ids3d):
+        cur_points2d = []
+        cur_view_mats = []
+        for frame in known_frames:
+            corners = corner_storage[frame]
+            if id in corners.ids.flatten():
+                cur_view_mats.append(view_mats[frame])
+                cur_points2d.append(corners.points[(corners.ids.flatten() == id)].reshape(-1))
+        if len(cur_points2d) >= 5:
+            eq = np.zeros(shape=(2 * len(cur_points2d), 4), dtype=float)
+            for (i, (view_mat, point2d)) in enumerate(zip(cur_view_mats, cur_points2d)):
+                proj = intrinsic_mat @ view_mat
+                eq[2 * i] = proj[2] * point2d[0] - proj[0]
+                eq[2 * i + 1] = proj[2] * point2d[1] - proj[1]
+            new_point3d = np.linalg.lstsq(eq[:, :3], -eq[:, 3], rcond=None)[0]
+            points3d[index] = new_point3d
+
+
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
                           frame_sequence_path: str,
                           known_view_1: Optional[Tuple[int, Pose]] = None,
                           known_view_2: Optional[Tuple[int, Pose]] = None) \
         -> Tuple[List[Pose], PointCloud]:
-    params = TriangulationParameters(1, 1, 0)
     frame_count = len(corner_storage)
+    #print("Path: ", frame_sequence_path)
+    print("Number of frames: ", frame_count)
     rgb_sequence = frameseq.read_rgb_f32(frame_sequence_path)
     intrinsic_mat = to_opencv_camera_mat3x3(
         camera_parameters,
@@ -59,113 +191,24 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     )
 
     if known_view_1 is None or known_view_2 is None:
-        CONFIDENCE = 0.90
-        MAX_ITERS = 10 ** 4
-        THRESHOLD_PX = 3.0
-        THRESHOLD_HOMOGRAPH = 0.6
-        THRESHOLD_ANGLE_RADIAN = 0.1
-
-        params_opencv = dict(
-            method=cv2.USAC_MAGSAC,
-            # ransacReprojThreshold=THRESHOLD_PX,
-            # threshold=THRESHOLD_PX,
-            confidence=CONFIDENCE,
-            maxIters=MAX_ITERS
-        )
-
-        # Lets for beginning we take first image and best image of all others
-        known_view_1 = (0, view_mat3x4_to_pose(eye3x4()))
-
-        max_verified_points = 0
-        max_homogr_points = 0
-        best_index_1 = -1
-        best_index_2 = -1
-        best_r, best_t = None, None
-        min_error = 5
-        for index_1 in range(0, frame_count):
-            # print("Cur index: ", index_1)
-            loop_range = range(index_1 + 1, min(index_1 + 40, frame_count))
-            if frame_count < 50:
-                loop_range = range(index_1 + 1, frame_count)
-            for index_2 in loop_range:  # 20 here is min shift
-                # Check Homography if too much
-                ids, (idx_1, idx_2) = snp.intersect(corner_storage[index_1].ids.flatten(),
-                                                    corner_storage[index_2].ids.flatten(),
-                                                    indices=True)
-                points1 = corner_storage[index_1].points[idx_1]
-                points2 = corner_storage[index_2].points[idx_2]
-
-                # print(index_1, index_2)
-                matrix_homogr, mask_homogr = cv2.findHomography(points1, points2,
-                                                                ransacReprojThreshold=THRESHOLD_PX,
-                                                                **params_opencv)
-                matrix, mask = cv2.findEssentialMat(points1, points2,
-                                                    method=cv2.RANSAC,
-                                                    cameraMatrix=intrinsic_mat,
-                                                    threshold=THRESHOLD_PX,
-                                                    prob=CONFIDENCE,
-                                                    maxIters=MAX_ITERS)
-                # Check angles is too smallt
-                if mask_homogr.sum() > THRESHOLD_HOMOGRAPH * mask.sum():
-                    # print("TOO MUCH homogr")
-                    continue
-                # corr = Correspondences(np.arange(len(points1)), points1, points2)
-                retval, r, t, inliers = cv2.recoverPose(E=matrix,
-                                                        points1=points1,
-                                                        points2=points2,
-                                                        cameraMatrix=intrinsic_mat)
-                inv_r, inv_t = inverse_transform(Rotation.from_matrix(r), t.reshape(-1))
-                pose_2 = Pose(inv_r.as_matrix(), inv_t)
-                pose_1 = view_mat3x4_to_pose(eye3x4())
-                corr = Correspondences(ids, corner_storage[index_1].points[idx_1], corner_storage[index_2].points[idx_2])
-                points3d, ids3d, error = triangulate_correspondences(
-                    corr,
-                    eye3x4(), pose_to_view_mat3x4(pose_2),
-                    intrinsic_mat,
-                    params
-                )
-                if points3d.shape[0] < 10:
-                    continue
-                # print(index_1, index_2, error)
-                if error > min_error:
-                    # print("TOO LITTLE angle")
-                    pass
-                min_error = error
-                # print(index_1, index_2, retval)
-                angle = np.mean(calc_triangulation_angles(pose_1, pose_2, points3d))
-                # print(index_1, index_2, angle)
-                if max_verified_points < retval and angle > THRESHOLD_ANGLE_RADIAN:
-                    max_verified_points = retval
-                    max_homogr_points = mask_homogr.sum()
-                    best_index_1 = index_1
-                    best_index_2 = index_2
-                    best_r, best_t = r, t
-        # print("Best indexs is: ", best_index_1, best_index_2)
-        # print("Max good points: ", max_verified_points)
-        # print("Homogr points: ", max_homogr_points)
-        # print("R: \n", best_r, "\nt: \n", best_t)
-        inv_r, inv_t = inverse_transform(Rotation.from_matrix(best_r), best_t.reshape(-1))
-        known_view_2 = (best_index_2, Pose(inv_r.as_matrix(), inv_t))
-        known_view_1 = (best_index_1, view_mat3x4_to_pose(eye3x4()))
-        # print("First image: \n", known_view_1)
-        # print("Second image: \n", known_view_2)
-        # END FOR SEARCHING TWO IMAGE
+        known_view_1, known_view_2 = find_best_init_frames(corner_storage, intrinsic_mat)
     # END OF FIND INITIAL TWO IMAGE
     print("End of initialization")
-    is_camera_found = [False] * frame_count
-    view_mats = [pose_to_view_mat3x4(known_view_1[1])] * frame_count
-    is_camera_found[known_view_1[0]] = True
+    view_mats = [pose_to_view_mat3x4(known_view_1[1]) for _ in range(frame_count)]
     view_mats[known_view_2[0]] = pose_to_view_mat3x4(known_view_2[1])
-    is_camera_found[known_view_2[0]] = True
 
     point_cloud_builder = PointCloudBuilder()
     corners_1 = corner_storage[known_view_1[0]]
     corners_2 = corner_storage[known_view_2[0]]
 
-    ids, (idx_1, idx_2) = snp.intersect(corners_1.ids.flatten(), corners_2.ids.flatten(),
-                                        indices=True)
-    corr = Correspondences(ids, corners_1.points[idx_1], corners_2.points[idx_2])
+    corr = build_correspondences(corners_1, corners_2)
 
+    unknown_frames = set(range(frame_count))
+    unknown_frames.remove(known_view_1[0])
+    unknown_frames.remove(known_view_2[0])
+    known_frames = [known_view_1[0], known_view_2[0]]
+
+    # TODO better triangulate current know 1 and know 2
     points3d, ids3d, error = triangulate_correspondences(
         corr,
         view_mats[known_view_1[0]], view_mats[known_view_2[0]],
@@ -174,71 +217,22 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     )
 
     point_cloud_builder.add_points(ids3d, points3d)
+    for i in range(frame_count - 2):
+        print("Already parsed frames: ", i + 2, " of ", frame_count)
+        ids3d, points3d, _ = point_cloud_builder.build_point_cloud()
+        new_frame, new_view = find_new_best_view(unknown_frames, known_frames,
+                                                 corner_storage, ids3d, points3d,
+                                                 view_mats, intrinsic_mat)
+        view_mats[new_frame] = new_view
+        unknown_frames.remove(new_frame)
+        triangulate_new_points(new_frame, known_frames,
+                               corner_storage, ids3d,
+                               view_mats, intrinsic_mat, point_cloud_builder)
+        known_frames.append(new_frame)
 
-    loop = 2
-    while loop < frame_count:
-        new_ids3d, new_points3d, _ = point_cloud_builder.build_point_cloud()
-        retval = False
-        confidence = 1
-        index = -1
-
-        mn_index = -1
-        max_len_cur_ids = 14
-        max_rvec = None
-        max_tvec = None
-        max_retval = False
-        while not max_retval:
-            confidence -= 0.01
-            if confidence < 0:
-                print("Cur loop: ", loop)
-                raise ValueError("Can't find confidence result")
-            for index in range(frame_count):
-                if not is_camera_found[index]:
-                    cur_corner = corner_storage[index]
-                    cur_ids, (cur_idx_1, cur_idx_2) = snp.intersect(cur_corner.ids.flatten(),
-                                                                    new_ids3d.flatten(),
-                                                                    indices=True)
-                    if len(cur_ids) >= max_len_cur_ids:
-                        retval, rvec, tvec, inliers = cv2.solvePnPRansac(objectPoints=new_points3d[cur_idx_2],
-                                                                         imagePoints=cur_corner.points[cur_idx_1],
-                                                                         cameraMatrix=intrinsic_mat,
-                                                                         distCoeffs=None,
-                                                                         reprojectionError=3,
-                                                                         confidence=confidence,
-                                                                         iterationsCount=200
-                                                                         )
-                        if retval:
-                            max_retval = True
-                            mn_index = index
-                            max_len_cur_ids = len(cur_ids)
-                            max_rvec = rvec
-                            max_tvec = tvec
-                            pass
-
-                        # if retval:
-                        #    break
-        index = mn_index
-        rvec = max_rvec
-        tvec = max_tvec
-        is_camera_found[index] = True
-        ratmat, transp = inverse_transform(Rotation.from_rotvec(rvec.reshape(-1)), tvec.reshape(-1))
-        #ratmat, transp = Rotation.from_rotvec(rvec.reshape(-1)), tvec.reshape(-1)
-        view_mats[index] = pose_to_view_mat3x4(Pose(ratmat.as_matrix(), transp))
-        cur_corner = corner_storage[index]
-        for other in range(frame_count):
-            other_corner = corner_storage[other]
-            if other != index and is_camera_found[other]:
-                cur_ids, (cur_idx_1, cur_idx_2) = snp.intersect(cur_corner.ids.flatten(),
-                                                                other_corner.ids.flatten(),
-                                                                indices=True)
-                cur_corr = Correspondences(cur_ids, cur_corner.points[cur_idx_1], other_corner.points[cur_idx_2])
-                new_points3d, new_ids3d, error = triangulate_correspondences(cur_corr,
-                                                                             view_mats[index],
-                                                                             view_mats[other],
-                                                                             intrinsic_mat, params)
-                if error < params.max_reprojection_error:
-                    point_cloud_builder.update_points(new_ids3d, new_points3d)
-        loop += 1
+        if i % 2 == 0:
+            retriangulate(known_frames, corner_storage, ids3d, points3d, view_mats, intrinsic_mat)
+            pass
 
     calc_point_cloud_colors(
         point_cloud_builder,
@@ -246,7 +240,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         view_mats,
         intrinsic_mat,
         corner_storage,
-        5.0
+        8.
     )
     point_cloud = point_cloud_builder.build_point_cloud()
     poses = list(map(view_mat3x4_to_pose, view_mats))

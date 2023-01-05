@@ -58,8 +58,8 @@ def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
     MAX_CORNERS = 200 #200
     MIN_DISTANCE = 20 #15, 10 or 30
-    QUALITY_LEVEL = 0.01
-    BLOCK_SIZE = 7 # 9
+    QUALITY_LEVEL = 0.011
+    BLOCK_SIZE = 10 # 9
 
     image_0 = frame_sequence[0]
     norm_image_0 = cv2.normalize(image_0, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
@@ -89,7 +89,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
             flags=cv2.OPTFLOW_LK_GET_MIN_EIGENVALS,
             winSize=(15, 15),
             maxLevel=5,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.02),
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
             #minEigThreshold=0.00011) #0.0011
         )
         corners = FrameCorners(corners.ids, p1, corners.sizes)

@@ -1,0 +1,5 @@
+docker run -ti -v "C:/Users/Makar/My_files/Study/Spbgu/3/vision/homework:/homework" python:3.9 /bin/bash
+apt-get update && apt-get install -y libgl1-mesa-dev
+pip install -r "homework/requirements.txt"
+pip install --force-reinstall moviepy  # if old moviepy doesn't work for some videos
+python "camtrack/testrunner.py" "??/dataset/dataset_ha3.yml" "??/results" > "??/results_log.txt"
