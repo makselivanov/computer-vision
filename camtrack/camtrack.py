@@ -97,7 +97,7 @@ def find_new_best_view(unknown_frames, known_frames,
     return min_frame, min_view
 
 
-params = TriangulationParameters(8., 0.5, 0.2)
+params = TriangulationParameters(9., 0.6, 0.1)
 
 
 def triangulate_new_points(new_frame, known_frames,
@@ -123,7 +123,7 @@ def triangulate_new_points(new_frame, known_frames,
 def find_best_init_frames(corner_storage, intrinsic_mat):
     POINTS_THRESHOLD = 20
     THRESHOLD_HOMOGRAPH = 0.7
-    INLIERS_THRESHOLD = 5
+    INLIERS_THRESHOLD = [100, 50, 10, 5]
     frame_count = len(corner_storage)
     max_angle = -1
     best_view_mat_1 = None
@@ -133,39 +133,41 @@ def find_best_init_frames(corner_storage, intrinsic_mat):
         step = 5
     if frame_count < 60:
         step = 1
-    for frame_1 in range(0, frame_count, step):
-        for frame_2 in range(frame_1 + step, frame_count, step):
-            print("Current init frames: ", frame_1, frame_2)
-            ids, (idx_1, idx_2) = snp.intersect(corner_storage[frame_1].ids.flatten(),
-                                                corner_storage[frame_2].ids.flatten(),
-                                                indices=True)
-            points1 = corner_storage[frame_1].points[idx_1]
-            points2 = corner_storage[frame_2].points[idx_2]
-            if len(points1) < POINTS_THRESHOLD:
-                continue
-            matrix_homogr, mask_homogr = cv2.findHomography(points1, points2, cv2.RANSAC)
-            matrix, mask = cv2.findEssentialMat(points1, points2, intrinsic_mat, cv2.RANSAC)
+    for inlier in INLIERS_THRESHOLD:
+        for frame_1 in range(0, frame_count, step):
+            for frame_2 in range(frame_1 + step, frame_count, step):
+                print("Current init frames: ", frame_1, frame_2)
+                ids, (idx_1, idx_2) = snp.intersect(corner_storage[frame_1].ids.flatten(),
+                                                    corner_storage[frame_2].ids.flatten(),
+                                                    indices=True)
+                points1 = corner_storage[frame_1].points[idx_1]
+                points2 = corner_storage[frame_2].points[idx_2]
+                if len(points1) < POINTS_THRESHOLD:
+                    continue
+                matrix_homogr, mask_homogr = cv2.findHomography(points1, points2, cv2.RANSAC)
+                matrix, mask = cv2.findEssentialMat(points1, points2, intrinsic_mat, cv2.RANSAC)
 
-            if mask_homogr.sum() >= mask.sum() * THRESHOLD_HOMOGRAPH:
-                continue
-            retval, r, t, _ = cv2.recoverPose(matrix, points1, points2, intrinsic_mat, cv2.RANSAC)
-            if retval < INLIERS_THRESHOLD:
-                continue
-            view_mat_1 = pose_to_view_mat3x4(Pose(np.eye(3), np.zeros(3)))
-            r, t = inverse_transform(Rotation.from_matrix(r), t.reshape(-1))
-            r = r.as_matrix()
-            view_mat_2 = pose_to_view_mat3x4(Pose(r, t.reshape(-1)))
-            corr = build_correspondences(corner_storage[frame_1], corner_storage[frame_2])
-            if len(corr.ids) == 0:
-                continue
-            points_3d, ids_3d, cos = triangulate_correspondences(corr, view_mat_1, view_mat_2, intrinsic_mat, params)
-            if len(ids_3d) == 0:
-                continue
-            angle = abs(np.arccos(cos))
-            if angle > max_angle:
-                max_angle = angle
-                best_view_mat_1 = (frame_1, view_mat3x4_to_pose(view_mat_1))
-                best_view_mat_2 = (frame_2, view_mat3x4_to_pose(view_mat_2))
+                if mask_homogr.sum() >= mask.sum() * THRESHOLD_HOMOGRAPH:
+                    continue
+                retval, r, t, _ = cv2.recoverPose(matrix, points1, points2, intrinsic_mat, cv2.RANSAC)
+                if retval < inlier:
+                    continue
+                view_mat_1 = pose_to_view_mat3x4(Pose(np.eye(3), np.zeros(3)))
+                r, t = inverse_transform(Rotation.from_matrix(r), t.reshape(-1))
+                r = r.as_matrix()
+                view_mat_2 = pose_to_view_mat3x4(Pose(r, t.reshape(-1)))
+                corr = build_correspondences(corner_storage[frame_1], corner_storage[frame_2])
+                if len(corr.ids) == 0:
+                    continue
+                points_3d, ids_3d, cos = triangulate_correspondences(corr, view_mat_1, view_mat_2, intrinsic_mat, params)
+                angle = abs(np.arccos(cos))
+                if angle > max_angle:
+                    max_angle = angle
+                    best_view_mat_1 = (frame_1, Pose(np.eye(3), np.zeros(3)))
+                    best_view_mat_2 = (frame_2, Pose(r, t.reshape(-1)))
+        if best_view_mat_1 is not None:
+            break
+    print("Frames: ", best_view_mat_1[0], best_view_mat_2[0])
     return best_view_mat_1, best_view_mat_2
 
 
@@ -238,7 +240,6 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     unknown_frames.remove(known_view_2[0])
     known_frames = [known_view_1[0], known_view_2[0]]
 
-    # TODO better triangulate current know 1 and know 2
     points3d, ids3d, error = triangulate_correspondences(
         corr,
         view_mats[known_view_1[0]], view_mats[known_view_2[0]],
@@ -255,14 +256,14 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                                  view_mats, intrinsic_mat)
         view_mats[new_frame] = new_view
         unknown_frames.remove(new_frame)
-        triangulate_new_points(new_frame, known_frames,
-                               corner_storage, ids3d,
-                               view_mats, intrinsic_mat, point_cloud_builder)
         known_frames.append(new_frame)
-
         if i % 10 == 0:
             retriangulate(known_frames, corner_storage, ids3d, points3d, view_mats, intrinsic_mat)
             retrace_views(known_frames, corner_storage, ids3d, points3d, view_mats, intrinsic_mat)
+
+        triangulate_new_points(new_frame, known_frames,
+                               corner_storage, ids3d,
+                               view_mats, intrinsic_mat, point_cloud_builder)
 
     calc_point_cloud_colors(
         point_cloud_builder,

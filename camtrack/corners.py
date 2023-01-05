@@ -59,7 +59,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
     MAX_CORNERS = 200 #200
     MIN_DISTANCE = 20 #15, 10 or 30
     QUALITY_LEVEL = 0.011
-    BLOCK_SIZE = 10 # 9
+    BLOCK_SIZE = 7 # 10
 
     image_0 = frame_sequence[0]
     norm_image_0 = cv2.normalize(image_0, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
